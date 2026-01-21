@@ -1,0 +1,126 @@
+---
+title: "Behind the Gates: Deciphering Milan's Area C Traffic DNA | 00 - Project Introduction"
+author: "Gabriele Pilotto - 902388"
+output: 
+  html_document:
+    theme: lumen
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Introduction
+In 2012, Comune di Milano has introduced the **Area C** which is a combined congestion charge and Low Emission Zone (ZTL) covering the area called "*Cerchia dei Bastioni*". It aims to reduce traffic, promote public transport and lower pollution levels by limiting the access to Milan's city center. The Area C is delineated by **ANPR (Automatic Number Plate Recognition) "gates"** monitoring the vehicles entrance 24/7 and logging aggregated information about them. 
+
+
+## How it works
+Area C operates by **capturing several information** and checking the compliance of the vehicle with the policies enforced by the city.
+If the vehicle is compliant (is paying the ticket or is whitelisted), it can access Area C; if it's not, a fine will be notified to the vehicle owner. Here how the checks performed.
+
+### Schedule
+The gates **log information 24/7**. However, Area C operates only with a specific schedule: Mon-Fri from 07:30 to 19:30.
+During Official Italian Holidays, the policies are not enforced:
+
+* January 1st and 6th
+* April 25th
+* April 1th (Monday after Easter, valid only in 2024)
+* June 2nd
+* August 15th
+* November 1st
+* December 8th, 25th and 26th (not included in the used dataset)
+
+### Automatic Number Plate Recognition (ANPR)
+High-definition cameras capture the vehicle’s license plate. The system immediately checks this plate against several databases such as:
+
+* **The "Blacklist"**: to see if the vehicle belongs to a category strictly banned from the zone.
+* **The "Whitelist"**: to identify vehicles with permanent exemptions, such as electric cars, motorcycles, or emergency vehicles.
+* **Payment Database**: to check if a valid daily ticket has already been "activated" for that specific plate.
+
+### Environmental & Technical Verification
+Since Area C is a "Congestion Charge" zone combined with a "Low Emission Zone" (ZTL), the gate check verifies:
+
+* **Engine Class** (according Euro Standard): even if you pay, certain highly polluting vehicles are generally prohibited.
+* **Vehicle Length**: sensors check if the vehicle exceeds 7.5 meters in length. Most vehicles over this limit are banned regardless of their engine type.
+* **Fuel Type**: it distinguishes between fuel types to apply different rules.
+
+### Special Lane Enforcement
+Of the 43 gates, 7 are reserved exclusively for public transport (buses and taxis). If a private vehicle enters through a "Public Transport Only" lane, the fine is triggered immediately and automatically, regardless of whether the driver has paid the Area C daily fee.
+
+
+
+# Project introduction
+The goal of this project is to **understand more about the Area C users** using prediction and inference techniques. The following questions will be used to conduct the research:
+
+* Does the *rush hour* corresponds to office hours? Are there some anomalous peaks?
+* Is the "Euro-rule" working? Is the most-pollutant-vehicles traffic decreasing?
+* What does distinguish a resident? It is the timestamp? The gate? The vehicle type?
+* In what context the more-pollutant-vehicles access the most?
+* What leads to more traffic?
+* What are the *clou-gates*?
+* Are some gates preferred by the residents?
+
+
+## The dataset
+The data used for this project are publicly available at https://dati.comune.milano.it/dataset. The dataset are provided by Comune di Milano while its maintenance and review is delegated to AMAT (Agenzia Mobilità Ambiente Territorio).
+
+For this work, the latest available data are utilized: from January 2024 to November 2024.
+
+* https://dati.comune.milano.it/dataset/ds2885_area-c-accessi-mensili-novembre-2024
+* https://dati.comune.milano.it/dataset/ds2885_area-c-accessi-mensili-ottobre-2024
+* https://dati.comune.milano.it/dataset/ds2885_area-c-accessi-mensili-settembre-2024
+* https://dati.comune.milano.it/dataset/ds2885_area-c-accessi-mensili-agosto-2024
+* https://dati.comune.milano.it/dataset/ds2885_area-c-accessi-mensili-luglio-2024
+* https://dati.comune.milano.it/dataset/ds2885_area-c-accessi-mensili-giugno-2024
+* https://dati.comune.milano.it/dataset/ds2885_area-c-accessi-mensili-maggio-2024
+* https://dati.comune.milano.it/dataset/ds2885_area-c-accessi-mensili-aprile-2024
+* https://dati.comune.milano.it/dataset/ds2885_area-c-accessi-mensili-marzo-2024
+* https://dati.comune.milano.it/dataset/ds2885_area-c-accessi-mensili-febbraio-2024
+* https://dati.comune.milano.it/dataset/ds2885_area-c-accessi-mensili-gennaio-2024
+
+**Additional datasets**, such as the ones necessary to decrypt the `varco_id` and other predictors are available at:
+
+* **Gates location**: http://dati.comune.milano.it/dataset/4cad1605-8225-4ecd-9b82-868b3af453e5
+* **Other values**: http://dati.comune.milano.it/dataset/0b396fd4-bdad-4588-89f8-1468c5451c49 
+
+
+## Assumptions
+Understanding if a vehicle is compliant or not, it may be difficult since it require to verify also if (i) it's a motorcycle or a car or a bus; (ii) if the anti-particulate filter is installed, or aftermarket, and coherent with the vehicle's emission class; (iii) how many strokes has the engine; (iv) the lenght of the vehicle...
+
+Unfortunately, the dataset doesn't include all the information required to analyze all the possible cases. To proceed with the project, the following **assumptions** will be considered:
+
+* If the vehicle it's a motorcycle, the entry will be discarded (due to incomplete information about motor strokes)
+* The FAP variable (anti-particulate filter) will be ignored (due to incomplete information)
+* The length of the vehicle will be ignored (due to missing variable)
+
+### Fuel-Euro policies
+Since the focus will be only on **cars**, the following table represents whether a vehicle is allowed or not in the Area C based on the fuel and Euro classification.
+
+| Fuel                  | Euro               | Status  |
+|-----------------------|--------------------|---------|
+| Electric              | Any                | Allowed |
+| Hydrogen              | Any                | Allowed |
+| Petrol (before 01/10) | Euro 3, 4, 5, 6    | Allowed |
+| Petrol (after 01/10)  | Euro 4, 5, 6       | Allowed |
+| Diesel                | Euro 6             | Allowed |
+| Methane / LPG         | Any                | Allowed |
+| Hybrid                | Any                | Allowed |
+| Petrol (before 01/10) | Euro 1, 2          | Blocked |
+| Petrol (after 01/10)  | Euro 1, 2, 3       | Blocked |
+| Diesel                | Euro 1, 2, 3, 4, 5 | Blocked |
+| Oil-fuel mixture      | Any                | Blocked |
+
+
+## R requirements
+To reproduce this project, please include the following requirements in your R library:
+```{r requirements}
+requirements=c("dplyr", "readr", "ggplot2", "lubridate", "janitor", "purrr", "magrittr", "stringr", "summarytools", "data.table", "viridis", "plotly", "sf", "leaflet", "scales", "mgcv", "caret", "modelr", "gratia", "speedglm", "nnet", "emmeans", "kknn", "tidyr", "e1071", "glmnet")
+
+for (req in requirements){
+  if (!require(req, character.only = TRUE)){
+      install.packages(req)
+  }
+}
+```

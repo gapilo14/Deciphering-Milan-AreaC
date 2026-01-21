@@ -1,0 +1,46 @@
+---
+title: "Behind the Gates: Deciphering Milan's Area C Traffic DNA | 05 - Conclusions"
+author: "Gabriele Pilotto - 902388"
+output: 
+  html_document:
+    theme: lumen
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+# Conclusions
+The analysis of Area C reveals a two-speed city: a Service Milan, dominated by polluting commuter and logistics flows that saturate the major access points (Venice, Turati), and a Residential Milan, which moves along lateral geographic routes. While pollution is a structural and predictable phenomenon linked to diesel/freight vehicles (LDA Accuracy: 79%), residential Milan is a spatial choice: the entrance point is the best predictor of life in the city center (Lasso Sensitivity: 74%). Area C functions as an environmental filter, but the real distinction between users is not the time of day, but the route chosen to access the city walls.
+
+
+## Answering with the data
+Recalling the initial research questions, we're now able to decipher the Area C Traffic DNA.
+
+### Milan's habits
+**Does the rush hour corresponds to office hours? Are there some anomalous peaks?**
+The EDA analysis has confirmed that the traffic peaks match almost perfectly the rush hour with some night peaks due to logistic transports. Even if unpredictable and characterized also by external factor not considered in this analysis (such as weather), the traffic seems to be predictable and strongly correlated to the productive cycle.
+
+**What leads to more traffic?**
+The crucial discriminant is the weekend: the traffic volume decreases a lot during the weekend, revealing that the Area C accesses are strongly related to the working patterns. 
+
+**Which are the clou-gates?**
+Turati and Venezia are the main gates. With a generalist traffic, they are the gates more used from the users. Due to their important traffic volume, it's difficult profile with accuracy, those gates are used by the deliveries, the tourists and the white collars. 
+
+### Environmental aspects
+**Is the "Euro-rule" working? Is the most-pollutant-vehicles traffic decreasing?**
+The traffic of pollutant vehicles is decreasing making the Area C policies an effective contributors of pollutant vehicles reduction. The hard-to-die category, contributing the most to increase pollution, is the diesel one combined with the trucks one. 
+
+**In what context the more-pollutant-vehicles access the most?**
+The most pollutant vehicles (mostly trucks) access the Area C during the morning, making the hour predictor the main cause of pollutant accesses.  Having a destination of use equal to goods increase the probability as well. 
+
+
+### User profiling
+**What does distinguish a resident? It is the timestamp? The gate? The vehicle type?**
+What distinguish a resident isn't just the hour but the geography. The Lasso model has demonstrated that the gate used is the best predictor. The fuel type is also good predictors: a resident will probably drive a petrol. As mentioned, the time isn't a good predictor, but a resident will probably enter the Area C in the afternoon.
+
+**Are some gates preferred by the residents?**
+Residents will access the Area C in the less frequented gates such as *Melegnano* and *Servio Tullio*. They usually avoid gates such as *Italia* and *Magenta*.
+
+
+
+

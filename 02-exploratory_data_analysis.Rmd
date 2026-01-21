@@ -1,0 +1,471 @@
+---
+title: "Behind the Gates: Deciphering Milan's Area C Traffic DNA | 02 - EDA"
+author: "Gabriele Pilotto - 902388"
+output: 
+  html_document:
+    theme: lumen
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+# Load libraries
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(scales)
+library(tidyr)
+library(viridis)
+library(plotly)
+library(leaflet)
+library(scales)
+library(sf)
+
+
+theme_set(theme_minimal() + theme(legend.position = "bottom"))
+```
+
+In this module, an Exploratory Data Analysis (EDA) is performed to visually inspect the traffic patterns, validate the initial hypothesis, and answer the descriptive research questions. Clean datasets, processed in the previous step, are loaded.
+
+```{r data-loading, include=TRUE, message=TRUE}
+# Load datasets from cache
+if (file.exists("Cache/df_features.rds") & file.exists("Cache/traffic_hourly.rds") & file.exists("Cache/sf_gatesGPS.rds")) {
+  df <- readRDS("Cache/df_features.rds")
+  df_hourly <- readRDS("Cache/traffic_hourly.rds")
+  sf_gatesGPS <- readRDS("Cache/sf_gatesGPS.rds")
+  message("Data loaded successfully from Cache.")
+} else {
+  stop("Cache files not found. Please run 01_data_preparation.Rmd first.")
+}
+```
+
+
+
+# Pattern Identification: Rush Hour Analysis
+**Does the rush hour corresponds to office hour? Are there some anomalous peaks?**
+
+As first analysis, the traffic volume is divided by time patterns to verify if there are some patterns traceable to office rush hour. 
+Since the dataset contains also data from weekends, a distinction is made; this can be re-purposed as checker. 
+Some data aggregation are made to create a dataset representing "all the Area C in a specific time slot".
+
+```{r temporal-patterns, include=TRUE, message=TRUE}
+
+# Data aggregation
+df_area_total <- df %>%
+  mutate(date = as.Date(dataora),
+                hour = as.numeric(format(as.POSIXct(dataora), "%H"))) %>%
+  
+  group_by(date, hour, is_weekend) %>% 
+  summarise(total_hourly_volume = sum(numero_transiti, na.rm = TRUE),
+                                  .groups = "drop")
+
+# Mean computation
+hourly_trend <- df_area_total %>%
+  group_by(hour, is_weekend) %>%
+  summarise(avg_transits = mean(total_hourly_volume),
+            se_transits = sd(total_hourly_volume) / sqrt(n()), 
+            .groups = "drop") %>%
+  mutate(day_type = if_else(is_weekend == 1, "Weekend", "Weekday"))
+
+# Plot
+p <- ggplot(hourly_trend, aes(x = hour, y = avg_transits, color = day_type)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 2) +
+  geom_ribbon(aes(ymin = avg_transits - se_transits,
+                  ymax = avg_transits + se_transits,
+                  fill = day_type),
+              alpha = 0.2,
+              color = NA) +
+  scale_x_continuous(breaks = 0:23) +
+  geom_vline(xintercept = c(7.5, 19.5),
+             linetype = "dashed", color = "darkgrey") +
+  labs(title = "Traffic Volume Temporal Patterns",
+       x = "Hour",
+       y = "Mean total transit",
+       color = "Day type",
+       fill = "Day type") +
+  coord_cartesian(ylim = c(0, 8000))
+
+ggplotly(p)
+```
+
+
+## Objective analysis
+The peak occurs at 8:00 on weekdays. However, the morning surge occurs well before typical business hours, indicating a weak correlation between office hours and rush hour. Looking at the behavior on Saturdays and Sundays, we see a completely different nature of the graph: at 8:00, while weekdays are at peak saturation, traffic is almost nonexistent on weekends. Traffic only begins to increase significantly after 10:00 AM, indicating a possible correlation between office hours and rush hour.
+
+An interesting factor is the presence of a slightly accentuated "M" shape (on weekdays): if rush hour coincided perfectly with office hours, one would expect a similar peak around 17:00 and 18:00, but this does not occur.
+
+This contradictory situation suggests that the true cause of rush hour is not dictated exclusively by office hours.
+
+
+## Subjective analysis
+If we consider the context, the situation changes compared to an objective analysis and allows us to identify two types of rush hour:
+
+1. **Service Rush Hour** <br>
+The weekday rush hour occurs at 8:00, but the people using the gates in the morning aren't just "people going to the office."
+A very steep ramp is evident before 7:30, starting at 4:00: there's a huge mass of vehicles entering just before the toll starts. This is the *service rush hour*:* logistics, supplies for bars/restaurants, artisans, and maintenance workers who must already be "inside" to avoid the entrance fee.
+
+2. **Office Rush Hour** <br>
+The 8:00 AM peak represents the heart of directional commuting. Further analysis will show that this corresponds to gates like *Turati* and *Venezia*. Despite the cost of Area C, thousands of people (often with company cars or hybrids) choose to enter precisely when their offices open, marking the office rush hour.
+
+3. **The second wave** <br>
+Traffic decreases between 12:00 and 15:00 (due to the lunch break and the end of morning deliveries). Traffic then picks up again around 17:00-18:00, but the afternoon peak is lower than the morning peak. This is because exiting Area C is not subject to a ticket, so the return flow is more spread out over time (some people leave at 16:00 and others stay for aperitifs). This interpretation could explain the presence of a less pronounced "M."
+
+4. **The "Dam" Effect** <br>
+Focusing on the vertical dashed lines (7:30 and 19:30), we can see the dam effect on weekdays: the drop after 19:30 is much less sharp than expected. This suggests that many wait until 19:31 to get into the city center for free dinner, maintaining high volumes throughout the rest of the evening.
+
+The initial hypothesis of a single rush hour should therefore be discarded. The Milanese "Rush Hour" is two-headed:
+
+* **Logistics/Operations**: (5:00  - 7:30 ) - Driven by the need to avoid ticketing
+* **Management/Clerics**: (8:00 - 9:30) - Driven by the rigid corporate work schedule
+
+
+### The Weekend
+On Saturdays and Sundays, the graph changes completely.
+
+* **The "Slow Awakening"** eliminates the 08:00 peaks; traffic only begins to seriously increase after 10:00.
+* **The Afternoon Peak** 15:00 - 16:00): This is the time for shopping and leisure; people freely enter the city center in the afternoon (policies are not active). The blue line surpasses the red line between 14:00 and 16:00: Milan's downtown area is more "lively" on weekend afternoons than on weekdays.
+* **The Night** (00:00 - 02:00): Weekend traffic is significantly higher than weekdays, clearly reflecting the city's nightlife.
+
+
+
+# Spatial Analysis: Clou Gates
+**Which are the Clou Gates?**
+
+In this section, the gates are ranked based on total traffic volume to identify the main entry points. 
+To achieve this, `numero_transiti` value are summed by `varco_id`; `varco_id` is also associated to its name location to increase readability.
+
+```{r clou-gates-GPS, include=TRUE, message=TRUE}
+
+# Summarize traffic volume (do not touch the geometry!)
+gate_summary <- df %>%
+  group_by(id_varco) %>%
+  summarise(total_volume = sum(numero_transiti, na.rm = TRUE),
+                           .groups = "drop")
+
+gates_tbl <- sf_gatesGPS %>%
+  st_drop_geometry()
+
+gates_tbl <- gates_tbl %>%
+  left_join(gate_summary,
+            by = c("id_amat" = "id_varco")) %>%
+  mutate(total_volume = as.numeric(total_volume))
+
+sf_gatesGPS <- sf_gatesGPS %>%
+  select(geometry) %>%
+  bind_cols(gates_tbl)
+
+
+# Map parameters
+pal <- colorNumeric(palette = "viridis",
+                    domain = sf_gatesGPS$total_volume)
+
+radius_fun <- function(x) {
+  (sqrt(x) / 15) * 0.2
+}
+
+# Plot
+leaflet(sf_gatesGPS) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addCircleMarkers(radius = ~radius_fun(total_volume),
+                   color = ~pal(total_volume),
+                   stroke = FALSE,
+                   fillOpacity = 0.8,
+                   label = ~paste0(label," Total transits: ",
+                                   label_number(scale_cut = cut_short_scale())(total_volume)),
+                                   labelOptions = labelOptions(direction = "auto",
+                                                               textsize = "12px",
+                                                               style = list("background-color" = "white"))) %>%
+  
+  addLegend(position = "bottomright",
+            pal = pal,
+            values = ~total_volume,
+            title = "Total transits",
+            opacity = 1) %>%
+  
+  setView(lng = 9.19,
+          lat = 45.47,
+          zoom = 13)
+
+```
+
+The map offers a spacial overview, useful to see and identify geographically where the most vehicles access the Area C. 
+However, this representation is useless to identify in a glance the "clou-gates", so a more classic approach is offered by a bar plot.
+
+```{r clou-gates-barplot, include=TRUE, message=TRUE}
+
+# Sumarize traffic volume and gates
+gate_ranking <- df %>%
+  group_by(id_varco) %>%
+  summarise(total_volume = sum(numero_transiti, na.rm = TRUE), .groups = "drop") %>%
+  left_join(sf_gatesGPS %>% st_drop_geometry() %>% select(id_amat, label),
+            by = c("id_varco" = "id_amat")) %>%
+  arrange(desc(total_volume)) %>%
+  mutate(label = factor(label, levels = label))
+
+# Plot
+ggplot(gate_ranking, aes(x = total_volume, y = label, fill = total_volume)) +
+      geom_col() + scale_x_continuous(labels = label_number(scale_cut = cut_short_scale())) +
+      scale_fill_viridis_c(direction = 1, name = "Total Transits") + 
+      labs(title = "Clou Gates",
+           x = "Total Transits",
+           y = "Gate Location") +
+  theme_minimal() +  theme(axis.text.y = element_text(size = 6),
+                           plot.margin = margin(5, 5, 5, 20))
+
+```
+
+
+## Objective analysis 
+Looking at the two graphs it's easy to declare tat the he clou gate is *Turati*, followed by *Venezia* and *Porta Vittoria*
+The most busy gates seems to be concentrated in the north area, with peaks at the gates on the main routes. 
+Out of 42 gates, only 40 have registered data. This may be given by a service interruption or gate discontinuation.
+
+
+## Subjective analysis
+The results shown in the graphs are not random. Looking at the main gates, it's possible to see the two axes:
+
+* **North-East Axis** <br>
+Turati and Venezia are the global "winners":
+  + *Turati* is the main entry point for those arriving from the Central Station and the Porta Nuova business district. It is the "corporate" gate that attracts all the business traffic, taxis, and official cars heading towards the Fashion District and Piazza della Scala.
+  + *Venezia* is the natural conduit of Corso Buenos Aires, one of the longest commercial arteries in Europe. Anyone arriving from the Monza/Padua route inevitably ends up at this gate on their way to the city center.
+
+* **East-West Axis** <br>
+It is possible to notice a very high traffic volumes on the city's flanks, more specifically at Porta Vittoria and Boccaccio/Mascheroni.
+  + *Porta Vittoria (East)* collects all the traffic arriving from the dense residential neighborhoods to the east and, above all, from those arriving from Linate Airport and the ring roads. It's a fast-flowing artery that leads directly to the Duomo.
+
+  + *Boccaccio/Mascheroni (West)* is the access to the "Milano bene" neighbourhood (Magenta/Pagano area). These gates serve residents with the highest per capita car density and those arriving from the Sempione/Fiera axis. The high number of transits here reflects the habitual use of private cars for commuting.
+
+
+### The Logic of "Main Roads" vs. "Capillaries"
+The difference between the top gates (*Turati*, *Venezia*) and those at the bottom (*Milazzo*, *Baretti*, *Rossini*) is purely structural: the Top Gates are located on multi-lane avenues (the old *Bastioni*), while the Bottom Gates are often located on narrow, one-way streets or in areas where traffic has been deliberately slowed (e.g., the alleys of Brera or protected residential areas).
+
+
+
+# Trend analysis: the "Euro-Rule" Effectiveness
+**Is the “Euro-rule” is really working? Is the most-pollutant-vehicles traffic decreasing?**
+
+During this analysis the percentage of most-pollutant vehicle is tracket over the 11 months. To understand if a vehicle is pollutant or not, please refer to the previous document. Recall that from October 2024 petrol car with Euro 3 classification are considered pollutant as well, so an incrment is expected in October and November. 
+To assess statistically the trend direction, a simple linear trend line is fitted in the graph. 
+
+```{r euro-rule, include=TRUE, message=TRUE}
+
+# Compute percentages
+pollution_trend <- df %>%
+  mutate(month_date = floor_date(date, "month")) %>%
+  filter(month!="December") %>%
+  group_by(month_date) %>%
+  summarise(total = sum(numero_transiti), 
+                    pollutants = sum(numero_transiti[is_pollutant == 1]),
+                    perc_pollutant = pollutants / total * 100)
+
+# Linear Model (inference check)
+trend_model <- lm(perc_pollutant ~ month_date, data = pollution_trend)
+summary(trend_model)
+
+# Enhanced ggplot
+p <- ggplot(pollution_trend, aes(x = month_date, y = perc_pollutant)) +
+            geom_line(color = "#252525", size = 1.2) +
+            geom_point(aes(color = perc_pollutant,
+                           size = 4,
+                           text = paste0("Month: ", format(month_date, "%b %Y"), "<br>",
+                                         "Pollutant: ", round(perc_pollutant, 2), "%"))) + 
+            geom_smooth(method = "lm", color = "#525252", linetype = "dashed", se = FALSE, size = 1) +
+            scale_x_date(date_labels = "%b %Y", date_breaks = "1 month") +
+            scale_color_viridis_c(direction = 1, name = "% Pollutants") + 
+            labs(title = "Pollutant Vehicles Trend",
+                 x = "Month",
+                 y = "% of pollutant vehicles") +
+            theme_minimal(base_size = 14) +
+            theme(axis.text.x = element_text(angle = 45, hjust = 1),
+                  plot.title = element_text(face = "bold", size = 16),
+                  plot.subtitle = element_text(size = 12))
+
+ggplotly(p, tooltip = "text")
+```
+
+## Objective analysis
+The graph clearly shows a downward trend in the percentage of polluting vehicles. The line follows a downward path with a slight fluctuation in the summer months, but generally stabilizes at increasingly lower values. At the end of the graph, despite the expected increase due to new restrictions in October 2024, the trend does not show a significant increase in the data.
+
+
+## Subjective analysis
+The  rise observed in August 2024 is an interesting point of reflection, which could be linked to seasonal factors (e.g., more traffic for summer vacations or access by commercial vehicles for renovation works).
+
+The small threshold raising in October could suggest that the restrictions had a greater effect than expected by limiting access by polluting vehicles or increasing the number of non-polluting vehicles that replaced more polluting ones. In fact, the raise may be given due to a seasonal effect.
+
+
+### A small comment abount the Linear Model
+The linear regression shows a model with a negative slope (-0.0021278), indicating that the percentage of polluting vehicles decreases over time slowly. The significance of this coefficient is confirmed by the value of $p = 0.0034$, suggesting that there is an interesting statistically significant relationship between the month and the percentage of polluting vehicles.
+Obviously, the R-squared (58%) suggests that some other factors not involved in this model may influence the results. 
+
+
+
+# Context Analysis: Pollutant Vechicles 
+**In what context the more-pollutant-vehicles access the most?**
+
+The context analysis aims to identify the top-ten combination between time and location that incentive the access of the most-pollutant vehicles. 
+A heatmap is proposed as graph to identify the match leading to higher concentration of pollutant vehicles. Since displaying all the gates will reduce the readability, only the top-ten gates are selected. The selection is based on how many pollutant vehicle have used a specific gate.
+
+```{r pollutants-entrance, include=TRUE, message=TRUE}
+
+# Gate selection
+top_10_gates <- df %>%
+  filter(is_pollutant == 1) %>%
+  group_by(id_varco) %>%
+  summarise(pollutant_vehicles = sum(numero_transiti, na.rm = TRUE),
+            .groups = "drop") %>%
+  arrange(desc(pollutant_vehicles)) %>%
+  slice_head(n = 10) %>%
+  pull(id_varco)
+
+# Data preparation
+heatmap_data <- df %>%
+  filter(id_varco %in% top_10_gates) %>%
+  group_by(id_varco, hour) %>%
+  summarise(pollutant_ratio = sum(numero_transiti[is_pollutant == 1]) / sum(numero_transiti),
+            total_transits = sum(numero_transiti),
+            .groups = "drop") %>%
+  
+  left_join(sf_gatesGPS %>% st_drop_geometry() %>% select(id_amat, label),
+            by = c("id_varco" = "id_amat"))
+
+# Plot
+p <- ggplot(heatmap_data, aes(x = hour, y = label, fill = pollutant_ratio, 
+                              text = paste0("Gate: ", label, "<br>",
+                                            "Hour: ", hour, "<br>",
+                                            "Pollutant Ratio: ", scales::percent(pollutant_ratio), "<br>",
+                                            "Total Vehicles: ", total_transits))) +
+     geom_tile(color = "white") +
+     scale_fill_viridis(option = "magma", labels = percent, direction = -1) +
+     scale_x_continuous(breaks = 0:23) +
+     labs(title = "Pollutant Intensity",
+          x = "Hour",
+          y = "Gate",
+          fill = "Pollutants") +
+     theme_minimal()
+
+ggplotly(p, tooltip = "text")
+```
+
+## Objective analysis
+There is a clear peak in polluting vehicle traffic between 3:00 and 6:00, just before camera monitoring begins. During Area C's operating hours (7:30 to 19:30), there is a substantial reduction in polluting traffic, even including exclusion days when the gates are disabled. The evening does not have the same morning peak, a phenomenon also correlated with the number of traffic per hour seen previously.
+
+
+## Subjective analysis
+The proposed heatmap offers several observations:
+
+1. **The "Dawn Peak"** <br>
+This is the most obvious finding: the maximum concentration of polluting vehicles occurs between 4:00 and 5:00.
+This could be the classic "race against time" effect, where older commercial vehicles enter *en masse* at dawn to make deliveries, supply markets, or working sites before Area C becomes active.
+The critical gates of *Venezia*, *Porta Romana*, *Porta Vittoria*, and *Legnano* (which show the darkest values) are the main axes of penetration toward the city center from the eastern and southern quadrants.
+
+2. **During Area C policy enforcement** <br>
+From 8:00 onward, the heatmap suddenly becomes clear, with the intensity dropping dramatically below an average of 3%.
+The ZTL acts as a deterrent: polluting vehicles avoid entry during operating hours. This could suggest that those who must enter during the day have already updated their fleet or choose not to enter at all.
+
+3. **Geographic Analysis of the Gates** <br>
+Some gates have a distinct "personality":
+    + *Venezia* and *Legnano*: these are the gates most congested by polluting vehicles during the night/morning hours. *Legnano*, in particular, serves the Parco Sempione/Brera area, often linked to the logistics of events or venues.
+    + *Porta Romana* and *Porta Vittoria*: they exhibit prolonged intensity. Their location suggests heavy traffic coming from the Eastern and Southern ring roads, historically areas with a high density of logistics warehouses.
+    + *Turati*: interestingly, despite being among the top 10, it is the one with the lightest colors on average during peak hours compared to the others, perhaps indicating more corporate/office traffic and less related to heavy morning logistics.
+
+4. **Evening Return** <br>
+A slight darkening of the colors is noted after 19:00 and 20:00. As soon as the cameras are turned off, private vehicles or small, less environmentally friendly vans return. However, the intensity is much lower than during the morning peak, suggesting that polluting evening traffic is more related to leisure or return traffic, rather than heavy logistics.
+
+
+
+# User Profiling: Residents vs Others
+**What does distinguish a resident?**
+
+As last step, the timestamp is used as predictor to identify if a user is resident or not. The graph represent the normalized data to comapre two similar curves instead of two uncomparable ones. The weekend timestamps are included.
+
+```{r user-profiling, include=TRUE, message=TRUE}
+
+# Prepare data
+resident_profile <- df_hourly %>%
+  group_by(hour) %>%
+  summarise(Resident = sum(resident_transits, na.rm = TRUE),
+            Non_Resident = sum(total_transits, na.rm = TRUE) - sum(resident_transits, na.rm = TRUE),
+            .groups = "drop") %>%
+  
+  pivot_longer(cols = c(Resident, Non_Resident),
+               names_to = "User_Type",
+               values_to = "Volume") %>%
+  
+  group_by(User_Type) %>%
+  
+  mutate(Percent_of_Daily = Volume / sum(Volume),
+         Tooltip = paste0("Hour: ", hour, "<br>",
+                          "User type: ", User_Type, "<br>",
+                          "Share of daily traffic: ", scales::percent(Percent_of_Daily, accuracy = 0.1)))
+
+# Plot
+p <- ggplot(resident_profile,
+            aes(x = hour,
+                y = Percent_of_Daily,
+                color = User_Type,
+                group = User_Type,
+                text = Tooltip)) +
+            geom_line(size = 1.3) +
+            geom_point(size = 2.5) +
+            geom_vline(xintercept = c(7.5, 19.5),
+                       linetype = "dashed",
+                       color = "grey50",
+                       alpha = 0.6) +
+            scale_x_continuous(breaks = 0:23) +
+            scale_y_continuous(labels = scales::percent) +
+            scale_color_viridis_d(option = "viridis", end = 0.8) +
+            labs(title = "Residents vs Non-Residents",
+                 x = "Hour",
+                 y = "Share of daily traffic",
+                 color = "User type") +
+            theme_minimal(base_size = 14) +
+            theme(plot.title = element_text(face = "bold"),
+                  legend.position = "bottom")
+
+ggplotly(p, tooltip = "text")
+
+```
+
+
+## Objective analysis
+Based on the data plotted, is possible to draw a predictive profile:
+
+* If a vehicle enters at 8:00, it is very likely (density ~7% vs ~4%) that it is a non-resident starting work.
+* If a vehicle enters at 17:00, it is almost certainly a resident returning home (density ~10% vs ~5%).
+
+Using the timestamps as predictor, seems to be a good strategy.
+
+
+## Subjective analysis
+Analyzing the normalized hourly distribution, profound structural differences emerge:
+
+* **Non-Resident**: as seen previously, the non-resident profile is dominated by the need to reach the city center for production purposes.
+  + **Offices**: The peak density of non-resident arrivals occurs at 8:00; this perfectly reflects the start of the working day and office services.
+  + **Logistics**: The traffic begins to increase significantly as early as 4:00-5:00, confirming that the supply flows and commuters who "beat" Area C are almost exclusively non-residents.
+  + **Diurnal stability**: during the day, the flow remains relatively constant between 5% and 6%, indicating arrivals related to errands, business appointments, and last-mile logistics.
+
+* **Resident**: Residents' behavior mirrors this, telling a story of "outgoing" mobility in the morning and "incoming" mobility in the afternoon:
+  + **Morning absence** (between 00:00 and 6:00) confirms that residents entering Area C are almost nonexistent, as they are already inside the ZTL, at their homes.
+  + The **peak return** traffic (17:00) explodes into a very high peak (10% of total daily resident traffic) around 17:00. This indicates that many Area C residents likely work or study outside the ZTL. The graph doesn't record when they leave, but it captures the massive moment when they return home at the end of the workday.
+
+
+### Considerations on the Social Context
+This graph tells us that Area C, in the late afternoon, is congested not by external "invaders," but by its own residents. The 17:00 peak of residents is much sharper than any peak of non-residents. This suggests that, while non-residents spread their arrivals throughout the morning, residents tend to all return at the same time, creating very strong localized pressure on the gates just as businesses begin to close.
+
+
+
+# General considerations
+An analysis of the Area C graphs paints a picture of a city adapting its pace in direct response to regulatory constraints. The *Milanese* day doesn't begin with the opening of offices, but much earlier, in a period between 4:00 and 6:00. During these hours, polluting vehicles are at their peak: couriers and suppliers saturate strategic access points like *Venezia*, *Legnano*, and *Porta Romana* to supply the city before the 7:30 tolls kick in.
+
+With the implementation of monitoring, mobility has changed. Traffic becomes cleaner but denser, peaking at 8:00, driven almost exclusively by non-residents entering the city for the workday, with the *Turati* access point confirming its position as the preferred gateway to the city's business district.
+
+In the afternoon, the clearest distinction emerges between those who live in the city and those who frequent it: while the flow of non-residents remains constant and distributed, residents exhibit synchronous behavior: the surge in returns home, which peaks at 17:00, saturates the gates' capacity much more than in the morning.
+
+The comparison with the weekend highlights Milan's duality: while on weekdays the city is already bustling with activity at 8:00; on weekends, the awakening is lazy, with leisure-related mobility that only kicks into gear in the afternoon and continues well past midnight.
+
+From this initial exploratory analysis, Area C appears to act not merely as an environmental filter, but as a true social regulator that shapes the living and working habits of anyone who crosses the borders of the Cerchia dei Bastioni.
+

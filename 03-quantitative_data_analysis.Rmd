@@ -1,0 +1,293 @@
+---
+title: "Behind the Gates: Deciphering Milan's Area C Traffic DNA | 03 - Quantitative Analysis"
+author: "Gabriele Pilotto - 902388"
+output: 
+  html_document:
+    theme: lumen
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+# Load libraries
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(mgcv)
+library(caret)
+library(modelr)
+library(plotly)
+library(gratia)
+library(broom)
+library(emmeans)
+library(sf)
+library(tidyr)
+
+theme_set(theme_minimal() + theme(legend.position = "bottom"))
+``` 
+
+# Introduction
+For the first analysis module, our goal will be to predict quantitative variable. Since the dataset is more suitable for classification, only a single quantitative analysis will be made.
+
+To start the analysis, let's import the required dataset; due to the model needs, the aggregated dataset will be used. 
+
+```{r data-loading, include=TRUE, message=TRUE} 
+# Load dataset from cache
+if (file.exists("Cache/traffic_hourly.rds") && file.exists("Cache/sf_gatesGPS.rds")) {
+  sf_gatesGPS <- readRDS("Cache/sf_gatesGPS.rds")
+  df_hourly <- readRDS("Cache/traffic_hourly.rds")
+  
+  # Change id_varco to its real location
+  df_hourly <- df_hourly %>%
+    left_join(sf_gatesGPS %>% 
+                st_drop_geometry() %>% 
+                dplyr::select(id_amat, label),
+                by = c("id_varco" = "id_amat"))
+  df_hourly$id_varco <- NULL
+  df_hourly$label <- as.factor(df_hourly$label)
+
+  message("Data loaded successfully.")
+  } else {
+  stop("Run step 01 first.")
+}
+```
+
+Since we're starting to predict, we'll need some data to verify if our model will work also with data not included in the training phase. To do so, we split the database in two giving 80% to the training phase while reserving 20% for the tests.
+
+```{r data-splitting, include=TRUE}
+# Split Train/Test (80/20)
+set.seed(123)
+train_index <- sample(1:nrow(df_hourly), 0.8 * nrow(df_hourly))
+train_data <- df_hourly[train_index, ]
+test_data <- df_hourly[-train_index, ]
+
+rm(df_hourly, train_index)
+
+# Remove NA (they'reare just 23)
+train_data <- na.omit(train_data)
+test_data <- na.omit(test_data)
+```
+
+
+# Traffic Volume Prediction
+**What leads to more traffic?**
+
+The question we'll try to answer is related to traffic volume prediction. We'll start from a basic Multiple Linear Regression considering as predictors:
+ 
+ * `hour` since will be probably the most influent predictor
+ * `day_of_week` since from EDA we discovered how the traffic differs from Weekday and Weekends
+ * `month` to capture holidays and the season effect
+ 
+As outcome, we'll look for `toral_transits`. 
+
+
+## Method 1: Multiple Linear Regressionù
+This model will surely perform poorly since we're considering the phenomenon as a linear one even if, from EDA, we found out that the traffic follows a "M" pattern. This model will simple act as a baseline to measure the improvements.
+Based on the chosen predictors, we'll compute:
+$$TotalTransits = \beta_0 + \beta_1(Hour) + \beta_2(DayOfWeek) + \beta_3(Month)\epsilon$$
+[!NOTE]
+To avoid the Intercept to be represented by the first gate on Monday of January, we'll switch to sum coding where the Intercept will be represented by the traffic global mean. Doing so, will allow us to interpret the influence of the other pretictor as the difference between itself and the mean value. From a prediction point of view this modification will not change anything, but from an inference point of view this will help us to answer better the research question.
+
+
+```{r multiple-linear-regression-training, include=TRUE, message=TRUE} 
+
+# Change the contrast settings
+options(contrasts = c("contr.sum", "contr.poly"))
+
+# Model
+linear_model <- lm(total_transits ~ hour + day_of_week + month, data = train_data)
+summary(linear_model)
+
+```
+
+Unfortunaly, we're not be able to see, for example, the comparison of all the days with the Intercept since teh last level (n-1) is implicit. By default, R will "hide" the last item. To be sure, we can print the levels and identify the last one (Sunday and December will be the ghosts).
+
+```{r levels, include=TRUE, message=TRUE} 
+levels(train_data$day_of_week)
+levels(train_data$month)
+```
+
+
+### Brief comment
+As expected, the model performed really poorly:
+
+Looking at the **R-Squared Adjusted** the multiple linear regression model explain only the 4% of all the traffic variability; the remaining 96% is considered noise or lost information. 
+
+The **Residual Standard Error** is confirming that the model is unable to predict correctly the traffic by having an error of 114 vehicle over the 74 vehicles represented in the Intercept. It's basically useless.
+
+However, the (almost) all the**p-value**s have a really low value; the time is surelly influencing the traffic.
+
+The residuals and the negative median (-38) indicate that the model really underestimate the traffic while being unable to detects the peaks. To be fair, we were aware of the non-linearity of the model since the EDA has clearly shown a "M" shape that a simple model like this one can't simply model.
+
+
+
+## Method 2: Polynomial Regression
+We really need to consider the non-linearity nature of the data. Here, we'll give the line to bend by using the Polynomial Regression:
+
+$$TotalTransits = \beta_0 + \beta_1(Hour) + \beta_2(Hour^2) + \beta_3(Hour^3) + \beta_4(Month) + \beta_5(DayOfWeek)...$$
+The quadratic term will alow a parabolic line (an ascend and a descend) while the cubic term will allow for two curves (one in the morning, one in the afternoon).
+
+```{r polinomial-linear-regression-training, include=TRUE, message=TRUE} 
+# Change the contrast settings
+options(contrasts = c("contr.sum", "contr.poly"))
+
+poly_model <- lm(total_transits ~ poly(hour, 4) + day_of_week + month, data = train_data)
+
+summary(poly_model)
+```
+
+### Brief comment
+Introducing the flexibility offered by the polynomial model, we can see a small increase of the **R-Squared Adjusted** that is now 18%. It's not good, but it confirms that the traffic isn't a cumulative phenomenon but cyclic. 
+
+The **coefficients** `poly(hour, 4)` are offering a more realistic scenario:
+
+  * `poly(hour, 4)2` has the highest value of -2.240e+04, indicating a inverded "U" probably representing the growing curve of the morning traffic respect the pacific night
+  * the terms 3 and 4 by being significative (looking at the p-value) are suggesting that we're not doing enough: we need more curves to express the differences between day and night
+  
+The errors represented by the **Residual Standard Error* are sill high: 105 is better than the previous 114 but not sufficient to be considered good. This is clearly saying that using an unique mean for Milan is not a good idea. Maybe is because we're considering a mean of all the gates?
+
+
+
+## Method 3: Polynomial Interaction Model
+With the 3rd approach, we'll combine two improvement:
+
+* Include the variable label to stop considering all the `label` with equal importance
+* Transform the model into an Iterative one; this will be useful since instead of assuming that the Monday curve is the same of the Sunday one, the hour predictor can interact with the day of week and create a better prediction. The EDA analysis suggests that: on weekday at 8:30 we have different curves than Sunday at the same hour.
+
+```{r polinomial-interaction-model, include=TRUE, message=TRUE} 
+
+# Change the contrast settings
+options(contrasts = c("contr.sum", "contr.poly"))
+
+# Model 
+interact_model <- lm(total_transits ~ poly(hour, 4) * day_of_week + month + label, data = train_data)
+
+summary(interact_model)
+
+```
+
+### Brief comment
+THis approach outsmarts all the previous. The synergy between time and space is the key: the **Residual Standard Error** is now decreased to 61; not the perfect result, but a significant improvement: the `label36` itself has an estimate of 247.3 just by itself. 
+Introducing the interaction has bring interesting results noticeable looking at `poly(hour, 4)1:day_of_week` results. We're now able to say that the shape of the day changes between the week and, by looking at the p-values, that the peaks are not standard or fixed. 
+
+Overall the **R-Squared Adjusted** of 72% is a great result, but the residuals still show a maximum error of 638: Milan's traffic it's almost never the same.
+
+
+
+## Bonus Method: GAM
+For a quick moment, we'll step out from linear model in favor of a Generalized Adattive Model.
+GAMs offer a very flexible spline that may represent the solution for this question. As bonus analysis we'll try to predict the total transits as a spline while keeping the interaction creating a different curve for every different day of week.
+
+Please note that instead of using the default Gaussian Distribution as family, we'll ue the Negative Binomial one. This choice has been made since the Gaussian one "suffers" the presence of very large outliers. 
+Traffic data is counted and often suffers from overdispersion, but in a Gaussian distribution the variance is constant. In real traffic data variance tends to increase as traffic increases: when there is little traffic, the variance is low; when there is a lot of traffic, the variance explodes. Using Negative Binomial should handle all the  spikes that the Gaussian tends to ignore or treat as errors.
+
+```{r GAM, include=TRUE, message=TRUE} 
+
+gam_model <- gam(total_transits ~ s(hour, by = day_of_week, k = 20) + 
+             day_of_week + month + label, 
+             data = train_data, 
+             family = nb(),
+             method = "REML")
+
+summary(gam_model)
+```
+
+### Brief comment
+Using a spline like `s(hour)` has increased again the quality of the model bringing the **R-Squared Adjusted** up to 84%. The **deviance explained** is also confirming that the GAM approach is the best one due to the model's ability to explain almost all the phenomenom, probably also thanks to the generous value `k=20` offering 20 degrees of freedom.
+
+
+
+## Models verification
+So far, we evaluated the metrics based on the training dataset. To verify the bounty of the mdodels is necessary to test them with the dedicated testing dataset. To keep it simple, we'll perform the checks just over the greatest models: the Interaction and GAM ones.
+
+A "real_profile" will be added to visualize how the model predictions differ from the average data in the dataset. 
+
+```{r model-comparison, include=TRUE, message=TRUE}
+
+# Real profile
+df_hourly <- readRDS("Cache/traffic_hourly.rds")
+
+real_profile <- df_hourly %>%
+  group_by(hour) %>%
+  summarise(real_mean = mean(total_transits, na.rm = TRUE), .groups = "drop")
+
+rm(df_hourly)
+
+
+# Prediction grid
+pred_grid <- test_data %>%
+  select(hour, day_of_week, month, label) %>%
+  distinct()
+
+pred_grid$pred_interact <- predict(interact_model, newdata = pred_grid)
+pred_grid$pred_gam <- predict(gam_model, newdata = pred_grid, type = "response")
+
+
+# Prediction aggregation by hour
+model_profiles <- pred_grid %>%
+  group_by(hour) %>%
+  summarise(IterativePoly = mean(pred_interact, na.rm = TRUE),
+            GAM = mean(pred_gam, na.rm = TRUE),
+            .groups = "drop")
+
+# Plot
+plot_data <- model_profiles %>%
+  inner_join(real_profile, by = "hour") %>%
+  rename(Mean2024 = real_mean) %>%
+  pivot_longer(cols = -hour, names_to = "Source", values_to = "Transits")
+
+p_final <- ggplot(plot_data, aes(x = hour, y = Transits, color = Source, linetype = Source)) +
+                  geom_line(size = 1) +
+                  geom_vline(xintercept = c(7.5, 19.5), linetype = "dashed", color = "#525252", alpha = 0.8) +
+                  scale_color_manual(values = c("Mean2024" = "#252525",
+                                                "IterativePoly" = "#d7191c",
+                                                "GAM" = "#2c7bb6")) +
+                  scale_linetype_manual(values = c("Mean2024" = "dot", 
+                                                   "IterativePoly" = "solid", 
+                                                   "GAM" = "solid")) +
+                  scale_x_continuous(breaks = 0:23) +
+                  labs(title = "Model Comparison",
+                       x = "Hour", 
+                       y = "Hourly mean transits (per gate)", 
+                       color = "Legenda", 
+                       linetype = "Legenda") +
+                  theme_minimal()
+ggplotly(p_final)
+
+```
+
+The GAM model with the Negative Binomial family has definetly won, even if it tents to overestimate in the night and underestimate over the day. The Iterative Polynomial Regression doesn't bend sufficiently to show the already seen "M" shape of the traffic; probably perform more interactions may improve the results, but we'll stick to GAMs.
+
+Just to be sure even from a empiric point of view, let's compute the Root Mean Squared Error to observe the residuals' standard deviation. 
+
+```{r model-comparison-RMSE, include=TRUE, message=TRUE}
+
+# Iterative Polynomial
+preds_interact <- predict(interact_model, newdata = test_data)
+rmse_interact <- sqrt(mean((test_data$total_transits - preds_interact)^2))
+
+# GAM
+preds_gam <- predict(gam_model, newdata = test_data, type = "response")
+rmse_gam <- sqrt(mean((test_data$total_transits - preds_gam)^2))
+
+# Print
+cat("RMSE Iterative Polynomial:", round(rmse_interact, 2), "\n")
+cat("RMSE GAM:", round(rmse_gam, 2), "\n")
+
+```
+
+We have the confirm: the GAM model performs better by getting wrong on average of 62 vehicles. Still is not perfect but, considering the traffic non-linear behavior, it's a good result.
+
+
+## Answering the question
+The increase in traffic within Milan's Area C appears to be attributable not to a single factor, but rather to a combination of social habits, environmental policies, and external variables.
+
+The main driver of congestion is undoubtedly the urban work routine: data show traffic peaks around the start and end times of work, while volume drops dramatically on weekends. This trend is also confirmed on a seasonal scale, with sharp reductions in traffic during holiday periods such as August and December.
+
+Regarding the composition of the vehicle fleet, the analysis highlights how the spread of hybrid vehicles is driving the maintenance of high volumes. While regulations discourage the most polluting vehicles, facilitated or free access for hybrid cars appears to offset this decline, preventing an actual reduction in the total number of vehicles on the road.
+
+Commercial traffic maintains a constant and less elastic presence throughout the day, being less affected by time variations than private cars.
+

@@ -1,0 +1,487 @@
+---
+title: "Behind the Gates: Deciphering Milan's Area C Traffic DNA | 01 - Data Preparation"
+author: "Gabriele Pilotto - 902388"
+output: 
+  html_document:
+    theme: lumen
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+# Load necessary libraries
+library(dplyr)
+library(ggplot2) 
+library(readr)
+library(purrr)
+library(purrr)
+library(stringr)
+library(lubridate)
+library(janitor)
+library(summarytools)
+library(data.table)
+library(sf)
+```
+
+In this module the raw data are imported, cleaned and featured with new variables useful for the purpose of the project.
+
+# Importing
+As first step, let's import the dataset. Please remember that each month is stored in a unique file, thus all the data will be merged into an unique dataframe. Due to the dimension of the dataset, in each step will be created a cache file. It's safe to clear R object at the end of every code chunk.
+
+```{r import-dataframe, include=TRUE}
+file_list <- list.files(path = "Dataset/original-data/", pattern = "*.csv", full.names = TRUE)
+
+# Merge in an unique dataframe
+df_raw <- file_list %>% 
+  map_df(read_csv, show_col_types = FALSE) %>% 
+  clean_names()
+
+# Save to cache
+saveRDS(df_raw, file = "Cache/df_raw.rds")
+
+```
+
+
+## Data exploration
+Let's have a look to our new merged dataframe to identify missing data or anomalies.
+
+```{r data-exploration, include=TRUE}
+
+# Import dataframe
+if (file.exists("Cache/df_raw.rds")) {
+  df_raw <- readRDS("Cache/df_raw.rds")
+} else {
+  print("Cache not found.")
+}
+
+print(dfSummary(df_raw), method="render")
+```
+
+
+### Data legenda
+The description of the variables are presented below:
+
+*   `dataora`: represents the initial timestamp of a 30-minutes aggregation window
+*   `id_varco`: is the gate identified (a separate dataset can be used to see the corresponding) location.
+*   `esenti`: boolean value that is:
+    +   `1`: if the vehicles are of the residents
+    +   `0`: else
+*   `moto`: boolean value that is:
+    +   `1`: if the vehicles is a motorcycle
+    +   `0`: else
+*   `residenti`: boolean value that is:
+    +   `1`: if the vehicle is owned by a Area C resident
+    +   `0`: else
+*   `veicoli_servizio`: bollean value that is:
+    +   `1`: if are service vehicles
+    +   `0`: else
+*   `cateogira_euro`: represents the vehicle emission class based on the Euro classification:
+    +   `0`: not specified
+    +   `1`: Euro 0
+    +   `2`: Euro 1
+    +   `3`: Euro 2
+    +   `4`: Euro 3
+    +   `5`: Euro 4
+    +   `6`: Euro 5
+    +   `7`: Euro 6
+*   `tipologia_alimentazione`: specifies the combustible used by the vehicles:
+    +   `0`: not specified
+    +   `1`: petrol
+    +   `2`: diesel
+    +   `3`: electric
+    +   `4`: LPG Methane
+    +   `5`: hybrid
+    +   `6`: LPG
+    +   `7`: fuel-oil mixture
+    +   `8`: hybrid-diesel
+    +   `9`: methane
+    +   `10`: hybrid-petrol
+    +   `11`: hybrid-petrol-elettric
+    +   `12`: hybrid-diesel-elettric
+    +   `13`: GNL
+    +   `14`: hydrogen
+*   `categoria_veicolo`: specifies the vehicle intended use:
+    +   `0`: not specified
+    +   `1`: other
+    +   `2`: bus
+    +   `3`: goods
+    +   `4`: people
+*   `classe_areac`: specifies the fee class of the vehicles:
+    +   `0`: not specified
+    +   `1`: authorized
+    +   `2`: ecologic vehicles
+    +   `3`: paying residents
+    +   `4`: paying service vehicles
+    +   `5`: other payers
+    +   `6`: motorcycle
+*   `fap`: boolean value that is:
+    +   `1`: if the vehicles have the anti-particulate-filter
+    +   `0`: else
+*   `areac`: boolean value that is:
+    +   `1`: if the Area C policies are enforced
+    +   `0`: else
+*   `numero_transiti`: aggregated value of vehicles with the specified characteristics
+
+
+### First consideration
+Looking at the summary and the related graphs, it's safe to say that:
+
+*   The dataset is complete: there aren't missing values for all the variables
+*   There are some variables with `unknow` (0) value:
+    +   `categoria_euro` has 13.8% unknown categorization
+    +   `tipologia_alimentazione` has 12.3% unknown fuel
+    +   `categoria_veicolo`has 6.0% unknown vehicle category
+    +   `classe_areac` has 0.7% unknown fee class
+*   Not all fuel options are used, some have have no utilization:
+    +   `4`: LPG methane
+    +   `5`: hybrid
+    +   `8`: hybrid-diesel
+    +   `10`: hybrid-petrol
+    +   `14`: hydrogen
+* The anti particulate filter check is performed also in non-diesel vehicles. Furthermore, there is no description if 1 equals to a regular FAP installation or just its presence. The use of this variable use quite useless.
+
+
+
+# Data Cleaning and Type Conversion
+According to the assumptions and consideration made, the following cleaning process is applied to the dataframe.
+
+## Preliminary cleanup
+As first step, let's:
+
+*   Delete of `fap` dimension since it's not a reliable source of information.
+*   Delete of all the entries with `moto = 1` since the motorcycle will not be included in this project.
+*   Re-organize of the fuel categories:
+    +   Remove unused options: `tipologia_alimentazione = 4, 5, 8, 10, 14`
+    +   Merge hybrid cars: `tipologia_alimentazione = 11, 12` as `tipologia_alimentazione = 4`
+    +   Merge the gases: `tipologia_alimentazione = 6, 9, 13` as `tipologia_alimentazione = 5`
+    +   Remove the jumps
+
+From now, for the fuel variable, please refer to the following table:
+
+| tipologia_alimentazione | corresponding fuel |
+|-------------------------|--------------------|
+| 0                       | Not specified      |
+| 1                       | Petrol             |
+| 2                       | Diesel             |
+| 3                       | Electric           |
+| 4                       | Gases              |
+| 5                       | Hybrid             |
+| 6                       | Fuel-oil mixture   |
+
+```{r preliminary-cleanup, include=TRUE}
+# Import dataframe
+if (file.exists("Cache/df_raw.rds")) {
+  df_raw <- readRDS("Cache/df_raw.rds")
+} else {
+  print("Cache not found.")
+}
+
+# Variable removal
+df_preClean <- df_raw %>%
+  select(-fap) %>%
+  filter(moto == 0) %>%
+  select(-moto) %>%
+  filter(!tipologia_alimentazione %in% c(4, 5, 8, 10, 14))
+
+# Release memory
+rm(df_raw)
+
+# Fuel re-mapping
+df_preClean <- df_preClean %>%
+  mutate(tipologia_alimentazione = case_when(tipologia_alimentazione %in% c(11, 12) ~ 5, # hybrid
+                                             tipologia_alimentazione %in% c(6, 9, 13) ~ 4, # gases
+                                             tipologia_alimentazione == 7 ~ 6, # petrol-oil mixture
+                                             TRUE ~ tipologia_alimentazione))
+
+# Check for duplicates 
+anyDuplicated(df_preClean)  # stops at the first duplicate
+
+# Save to cache and release memory
+saveRDS(df_preClean, file = "Cache/df_preClean.rds")
+
+```
+
+
+### Duplicate removal
+Since we removed 2 dimensions (`fap`, `moto`) and merged categories (`tipologia_alimentazione`), rows that were previously distinct are now identical. This is confirmed also by the checker `anyDuplicated(df_clean)` returning true. To fix this, we must re-aggregate the data by summing the `numero_transiti` for the grouped rows. To verify that no data are lost during transformation, a check on the total number of transits is performed at the end of every aggregation step.
+
+```{r duplicate-aggregation}
+# Import dataframe
+if (file.exists("Cache/df_preClean.rds")) {
+  df_preClean <- readRDS("Cache/df_preClean.rds")
+} else {
+  print("Cache not found.")
+}
+
+# Aggregation
+df_preCleanAgg <- df_preClean %>%
+  group_by(dataora, id_varco, esenti, residenti, veicoli_servizio, 
+           categoria_euro, tipologia_alimentazione, categoria_veicolo, 
+           classe_areac, areac) %>%  # don't group by 'numero_transiti'
+  summarise(numero_transiti = sum(numero_transiti), .groups = 'drop')
+
+# Release memory
+previous_sum <- sum(df_preClean$numero_transiti)
+rm(df_preClean)
+
+# Final check and save to cache
+if(anyDuplicated(df_preCleanAgg) > 0) {
+  print("There are duplicates")
+  }else{
+  if(previous_sum == sum(df_preCleanAgg$numero_transiti)) {
+    saveRDS(df_preCleanAgg, file = "Cache/df_preCleanAgg.rds")
+  }else{
+    stop("Some data are missing")
+  }
+}
+
+```
+
+No duplicates are notified by the checker. Is now possible to proceed with the next steps.
+
+
+## Type Conversion and Labelling
+In this step, will be performed the final type conversions to work with correct datatypes. Also some labels will be applied to simplify the future works; this will be useful mostly for graphs.
+
+```{r typeConversion-labelling, include=TRUE}
+
+# Import dataframe
+if (file.exists("Cache/df_preCleanAgg.rds")) {
+  df_preCleanAgg <- readRDS("Cache/df_preCleanAgg.rds")
+} else {
+  print("Cache not found.")
+}
+
+df_conversionLabel <- df_preCleanAgg %>%
+  mutate(
+    
+    # Time
+    dataora = ymd_hms(dataora),
+    
+    # Gate ID
+    id_varco = as.factor(id_varco),
+    
+    # Booleans
+    esenti = as.logical(esenti),
+    residenti = as.logical(residenti),
+    veicoli_servizio = as.logical(veicoli_servizio),
+    areac = as.logical(areac),
+    
+    # Labels
+    tipologia_alimentazione = factor(tipologia_alimentazione, 
+                                     levels = c(0, 1, 2, 3, 4, 5, 6),
+                                     labels = c("Not Specified", "Petrol", "Diesel", "Electric", 
+                                                "Gases", "Hybrid", "Fuel-oil mixture")),
+    
+    categoria_veicolo = factor(categoria_veicolo,
+                               levels = c(0, 1, 2, 3, 4),
+                               labels = c("Not Specified", "Other", "Bus", "Goods", "People")),
+    
+    classe_areac = factor(classe_areac,
+                          levels = c(0, 1, 2, 3, 4, 5, 6),
+                          labels = c("Not Specified", "Authorized", "Ecologic", "Resident (Pay)", 
+                                     "Service (Pay)", "Other (Pay)", "Motorcycle")),
+    
+    categoria_euro = factor(categoria_euro, 
+                            levels = c(0, 1, 2, 3, 4, 5, 6, 7),
+                            labels = c("Not Specified", "Euro 0", "Euro 1", "Euro 2", "Euro 3",
+                                       "Euro 4", "Euro 5", "Euro 6")),
+  )
+
+# Release memory
+rm(df_preCleanAgg)
+
+# Check for duplicates, disabled to preserve RAM
+#anyDuplicated(df_conversionLabel) > 0 
+
+# Save to cache
+saveRDS(df_conversionLabel, file = "Cache/df_conversionLabel.rds")
+
+```
+
+
+### Duplicate removal
+Converting `dataora` from string to YearMonthDay-HourMinuteSecond format brings some duplicate, probably due to hidden values below the seconds or hidden spaces. As before, the duplicates are aggregated.
+
+```{r clean-aggregation, include=TRUE}
+# Import dataframe
+if (file.exists("Cache/df_conversionLabel.rds")) {
+  df_conversionLabel <- readRDS("Cache/df_conversionLabel.rds")
+} else {
+  print("Cache not found.")
+}
+
+# Space removal and aggregation
+df_clean <- df_conversionLabel %>%
+  mutate(
+    dataora = ymd_hms(trimws(dataora))
+  ) %>%
+  group_by(across(-numero_transiti)) %>%
+  summarise(
+    numero_transiti = sum(numero_transiti, na.rm = TRUE), 
+    .groups = 'drop'
+  )
+
+# Final check and save to cache
+if(anyDuplicated(df_clean) > 0) {
+  print("There are duplicates")
+}else{
+  if(sum(df_clean$numero_transiti) == sum(df_conversionLabel$numero_transiti)) {
+    saveRDS(df_clean, file = "Cache/df_clean.rds")
+  }else{
+    print("Some data are missing")
+  }
+}
+
+# Release memory
+rm(df_conversionLabel)
+gc()
+```
+
+
+
+# Feature engineering
+For some analysis and control, some new variables are needed. Will be added:
+
+*   `holydays_2024` representing the Official Italian Holidays when the Area C policies are suspended
+*   **Time Components** for breaking down the original timestamp in something useful for the analysis
+*   **Time boolean** to identify:
+    +   **Weekends**
+    +   **Holidays**
+    +   **Rush hour**: defined as 7-9AM and 17-19 (usual pre and post office hours)
+    +   **Post-closure**: Area C closes at 19:30. Needed to spot peaks immediately after.
+
+
+### About the pollutant check
+Creating a boolean for the pollution it may be difficult, especially because, from the October 1st 2024, petrol vehicles with a classification of Euro 3 have been considered pollutant. Before that day, those vehicles could access the area with the standard procedure. To define a vehicle **pollutant** is necessary to check if:
+
+*   The new policy is active and enforced
+*   The fuel type
+*   The Euro classification
+
+```{r features, include=TRUE}
+# Import dataframe
+if (file.exists("Cache/df_clean.rds")) {
+  df_clean <- readRDS("Cache/df_clean.rds")
+} else {
+  print("Cache not found.")
+}
+
+# Italian Holidays for 2024
+holidays_2024 <- as.Date(c("2024-01-01", "2024-01-06", "2024-03-31", "2024-04-01",
+                           "2024-04-25", "2024-05-01", "2024-06-02", "2024-08-15", 
+                           "2024-11-01", "2024-12-08", "2024-12-25", "2024-12-26"))
+
+df_features <- df_clean %>%
+  mutate(
+    
+    # Time components
+    date = as.Date(dataora),
+    month = lubridate::month(dataora, label = TRUE, abbr = FALSE), 
+    day_of_week = lubridate::wday(dataora, label = TRUE, week_start = 1), # Mon=1
+    hour = hour(dataora),
+    minute = minute(dataora),
+    
+    # Time boolean
+    is_weekend = day_of_week %in% c("Sat", "Sun"),
+    is_holiday = date %in% holidays_2024,
+    is_rush_hour = ((hour >= 7 & hour <= 9) | (hour >= 17 & hour <= 19)),
+    is_post_closure = ((hour == 19 & minute >= 30) | hour == 20),
+
+    # resident flag omitted since it's already converted before as boolean
+    
+    # Pollutant check
+      # Policy period
+      strict_policies = month %in% c(10, 11),
+  
+      # Fuel type
+      is_petrol = tipologia_alimentazione == "Petrol",
+      is_diesel = tipologia_alimentazione == "Diesel",
+      is_mixture = tipologia_alimentazione == "Fuel-oil mixture",
+  
+      # Euro categories
+      is_lowEuro_petrol = categoria_euro %in% c("Not Specified", "Euro 0", 
+                                                "Euro 1", "Euro 2"),
+      is_lowEuro_petrol_new = categoria_euro %in% c("Not Specified", "Euro 0", 
+                                                    "Euro 1", "Euro 2", "Euro 3"),
+      is_lowEuro_diesel = categoria_euro %in% c("Not Specified", "Euro 0",
+                                                "Euro 1", "Euro 2", "Euro 3", 
+                                                "Euro 4", "Euro 5"),
+  
+      # Pollutant boolean
+      is_pollutant = case_when(is_petrol & is_lowEuro_petrol_new & strict_policies ~ TRUE,
+                               is_petrol & is_lowEuro_petrol ~ TRUE,
+                               is_diesel & is_lowEuro_diesel ~ TRUE,
+                               is_mixture ~ TRUE,
+                               TRUE ~ FALSE))
+
+# Check and save to cache
+if (sum(df_clean$numero_transiti) == sum(df_features$numero_transiti)) {
+  saveRDS(df_features, file = "Cache/df_features.rds")
+}else{
+  print("Some data are missing")
+}
+
+# Memory release
+rm(df_clean)
+
+```
+
+
+
+## Aggregation
+For some analysis an aggregated dataset by time metrics is needed.
+
+```{r aggregation, include=TRUE}
+# Import dataframe
+if (file.exists("Cache/df_features.rds")) {
+  df_features <- readRDS("Cache/df_features.rds")
+} else {
+  print("Cache not found.")
+}
+
+traffic_hourly <- df_features %>%
+  group_by(date, hour, day_of_week, month, is_weekend, is_holiday, id_varco) %>%
+  summarise(total_transits = sum(numero_transiti),
+            # Count specific subsets using the flags and transits
+            pollutant_transits = sum(numero_transiti[is_pollutant == 1]),
+            resident_transits = sum(numero_transiti[residenti == TRUE]),
+            .groups = "drop")
+
+saveRDS(traffic_hourly, file = "Cache/traffic_hourly.rds")
+
+```
+
+
+
+# Geographical information
+Some plot require to visualize in a map the location of the gates. The gates' GPS coordinates are loaded and converted.
+
+```{r GPS, include=TRUE}
+gates <- read.csv2("Dataset/ingressi_areac_varchi.csv", stringsAsFactors = FALSE)
+
+# Convert data type
+gates$id_amat <- as.factor(gates$id_amat)
+
+sf_gatesGPS <- st_as_sf(gates, coords = c("LONG_X_4326", "LAT_Y_4326"), crs = 4326)
+
+saveRDS(sf_gatesGPS, file = "Cache/sf_gatesGPS.rds")
+```
+
+
+
+# Last check
+Before moving to the analysis, let's check if there are all the required data.
+
+```{r last-check, include=TRUE, message=TRUE}
+# Import dataframe
+if (file.exists("Cache/df_features.rds") & file.exists("Cache/traffic_hourly.rds")) {
+  message("Ready to go!")
+} else {
+  message("Some data are missing")
+}
+```
+
+If the check is passed, it's now possible to start the analysis.

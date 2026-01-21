@@ -1,0 +1,728 @@
+---
+title: "Behind the Gates: Deciphering Milan's Area C Traffic DNA | 04 - Qualitative analysis"
+author: "Gabriele Pilotto - 902388"
+output: 
+  html_document:
+    theme: lumen
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(plotly)
+library(caret)
+library(MASS)
+library(class)
+library(pROC)
+library(sf)
+library(broom)
+library(speedglm)
+library(nnet)
+library(biglm)
+library(kknn)
+library(caret)
+library(e1071)
+library(glmnet)
+library(leaflet)
+
+theme_set(theme_minimal() + theme(legend.position = "bottom"))
+```
+
+In the last analysis section, the focus is based on understanding the behavior of the users so we'll use an approach based on classification techniques. 
+
+
+## Data loading
+As first step, let's load and prepare the required data. For the resident identikit we'll need a new binary variable (is_resident) that we omitted in the original data preparation module. 
+As before, we'll split the dataset following the 80/20 rule.
+
+```{r data-loading-preparation, include=TRUE}
+
+# Load dataset from cache
+if (file.exists("Cache/df_features.rds") && file.exists("Cache/sf_gatesGPS.rds")) {
+  sf_gatesGPS <- readRDS("Cache/sf_gatesGPS.rds")
+  df <- readRDS("Cache/df_features.rds")
+  
+  # Change id_varco to its real location
+  df <- df %>%
+    left_join(sf_gatesGPS %>% 
+                st_drop_geometry() %>% 
+                dplyr::select(id_amat, label),
+                by = c("id_varco" = "id_amat"))
+  df$id_varco <- NULL
+  df$label <- as.factor(df$label)
+  
+  rm(sf_gatesGPS)
+
+  message("Data loaded successfully.")
+  } else {
+  stop("Run step 01 first.")
+}
+
+# Split data
+set.seed(123)
+train_index <- sample(1:nrow(df), 0.8 * nrow(df))
+train_data <- df[train_index, ]
+test_data  <- df[-train_index, ]
+
+rm(df, train_index)
+
+# Remove NAs (they are 23)
+train_data <- na.omit(train_data)
+test_data  <- na.omit(test_data)
+
+# Transofmr to factor (LDA, KNN require that)
+train_data$residenti <- as.factor(train_data$residenti)
+test_data$residenti  <- as.factor(test_data$residenti)
+
+train_data$tipologia_alimentazione <- as.factor(train_data$tipologia_alimentazione)
+train_data$categoria_veicolo <- as.factor(train_data$categoria_veicolo)
+```
+
+
+### Unbalanced dataset mitigation
+If we look at the available data, we can spot an inequity between residents and non-residents: only 15% of all the transits are made by residents. 
+
+To avoid an unbalanced test and train set, I decided to re-sample the dataset considering the inequity. The new dataset dimension will match the number of resident's transits.
+
+```{r training_balanced, include=TRUE}
+# Verify inequity
+cat("Original dataset:")
+prop.table(table(train_data$residenti))
+
+set.seed(123)
+
+# Data preparation
+residenti_true  <- train_data[train_data$residenti == TRUE, ]
+residenti_false <- train_data[train_data$residenti == FALSE, ]
+n_residenti <- nrow(residenti_true) # The sample 
+
+# Non resident sampling
+non_residenti_sampled <- residenti_false[sample(1:nrow(residenti_false), n_residenti), ]
+
+# New dataset
+train_balanced <- rbind(residenti_true, non_residenti_sampled)
+rm(residenti_true, residenti_false, non_residenti_sampled)
+
+# Verify equity
+cat("New dataset:")
+prop.table(table(train_balanced$residenti))
+
+```
+
+
+# Resident Identikit
+**What does distinguish a resident? It is the timestamp? The gate? The vehicle type?**
+
+The first research question we will answer with classification is about the resident identikit. This is not a simple task: knowing the Milan's context and by looking at the EDA, predicting the habits of a resident it's challenging due to their unpredictable behavior. For this reason, the approach I decided to follow for the predictor choice may sound unconventional but is the one that can help us the most while identifying a resident. 
+
+
+## Method 1: Logistic Regression
+Beside the linear one, the Logistic Regression is used when the answer is boolean. In our case the answer to the question "is the user a resident?" can only be yes or no, so the Logistic Regression suits perfectly or goal. With this analysis we'll see the Odds or Logit 
+
+$$\ln\left(\frac{P}{1-P}\right) = \beta_0 + \beta_1X_1 + \beta_2X_2 + ... + \beta_nX_n$$
+where: 
+  * $P$ is the user probability of being a resident
+  * $\frac{P}{1-P}$ is the Odds (the relationship between being or not being a resident)
+  
+By applying the exponential function to the coefficients ($\exp(\beta)$) we'll be able to see how much each predictor influence the probability of being a resident. 
+
+The predictors chosen for this analysis are: 
+ * `hour`: the resident are peaks related to their lifestyle that differs from the workers
+ * `is_weekend`: from the EDA we saw that non-resident traffic decreases over the weekends 
+ * `tipologia_alimentazione` and `is_pollutant`: since residents have special permission based on the Euro classification, it may be ineresting have a look; also profiling the fule type can help us to define a more precise identikit
+  * `categoria_veicolo`: a resident should rarely access the Area C with a truck... 
+
+```{r logistic-regression, include=TRUE}
+
+# Model
+logit_model <- glm(residenti ~ hour + is_weekend + tipologia_alimentazione + 
+                   categoria_veicolo + is_pollutant, 
+                   data = train_balanced, 
+                   family = binomial)
+
+summary(logit_model)
+
+# Compute odds ratio
+odds_ratios <- exp(coef(logit_model))
+cat("Odds ratio: ", odds_ratios)
+```
+
+Since we're using Dummy Coding, R has chosen for us the first level of each list as the baseline hiding it behind the Intercept. Let's print the list values: 
+
+```{r list-discovery, include=TRUE}
+levels(train_balanced$tipologia_alimentazione)
+levels(train_balanced$categoria_veicolo)
+```
+
+By looking at the output, we can find that the hidden values are "Not Specified" so the other coefficient will be idnicate how the probability changes given the "Not Specified" value as baseline.
+
+
+### Brief comment
+```{r logistic-analysis, include=TRUE}
+
+table_or <- data.frame(
+  Coefficient = c("Intercept",
+                  "categoria_veicoloPeople",
+                  "tipologia_alimentazionePetrol",
+                  "tipologia_alimentazioneDiesel",
+                  "hour",
+                  "is_pollutant",
+                  "tipologia_alimentazioneElectric"),
+  
+  RealCategory = c("Baseline",
+                  "Car",
+                  "Petrol",
+                  "Diesel",
+                  "Hour",
+                  "Pollutant",
+                  "Electric"),
+  
+  Coefficient = c(-1.87,
+                  1.12,
+                  1.03,
+                  0.43,
+                  0.05,
+                  -1.82,
+                  -3.54),
+  
+  OddsRatio = c(0.15,
+                3.09,
+                2.81,
+                1.54,
+                1.05,
+                0.16,
+                0.02),
+  
+  Comment = c("Base probability very low",
+              "Decent prob. and high influence",
+              "Decent prob. and high influence",
+              "Small prob and decent influence",
+              "EDA confirmed, decent influence",
+              "Low prob. and low influence",
+              "Really low prob and influence"),
+            stringsAsFactors = FALSE)
+
+knitr::kable(
+  table_or,
+  caption = "Odds Ratio Interpretation",
+  align = "l"
+)
+
+rm(table_or, odds_ratios)
+
+```
+
+Looking at the computed Odds Ration results we can assets that being a resident is, by default, less probable. The first three characteristics we may want to use for the identikit (+ a brief context explanation) are:
+
+  * **Petrol vehicles** and **Car** if the vehicle is a car and it uses petrol, the probability of being a resident are higher than the baseline. This leads to tow option: (i) residents have traditional cars for small joruney, (ii) residents have sportcars (usually are petrol-powered). Being the most exclusive area of Milan, the cars inside the Cerchia dei Bastioni are probably supercars.
+  
+  * **Electric**: even if having an electric car gives the resident free and unlimited access, the electric-powered vehicles are a rarity among residents. This means also that all the electric vehicle we saw in the EDA module may be commercial ones (probably for mid-day deliveries).
+  
+  * The **pollution** is interesting because it has a negative impact on the chances of being a resident but it's not that low. This may confirm the hypotesys about supercars I've just made.
+  
+  * The **time** is still a good predictor, probably due to the entrance peak in the afternoon we saw in the EDA; with a Odds Ratio of 1.05, every hour passed increments the probability of being a resident.
+
+By this first analysis we can predict that **a resident probably drives an electric or diesel car in the afternoon**. 
+
+From a pure statistic point of view, all the **p-value**s (except from oil-fuel mixture) are extremely low giving statistical significance to the used predictors. Also, the **residual deviance** is showing a value of about 2,46M that, given the deviance of a blind model (null deviance), shows a 20% reduction; this confirms that the chosen predictors are the right ones and have a strong discriminant power. 
+
+
+## Method 2: Linear Discriminant Analisys
+With the previous model we were able to understand the probabilities and the qualitative identikit. The Linear Discriminant Analysis model tries to project the data into a new dimension maximizing the separation between the means of residents vs non-residents. This will mark a border between two "cloud points" and fine tuning the possibilities that makes an user a resident.
+
+We'll print the LD1 (coefficients) and their values: they'll indicate how much every variable contributes to mark a user as resident.
+
+```{r lda-model, include=TRUE}
+lda_model <- lda(residenti ~ hour + is_weekend + is_pollutant + 
+                 tipologia_alimentazione + categoria_veicolo, 
+                 data = train_balanced)
+
+print(lda_model)
+```
+
+
+### Brief comment
+The LDA results are coherent with the Logistic Regression ones: the patterns distinguishing the residents are stable and model-independent. 
+
+
+#### Group Means
+Quickly looking at the group means, we can spot the mentioned confirmations:
+
+  * **Petrol**: residents tent to use this fuel two time more than a non resident (0.49 vs 0.2)
+  * **People (car)**: almost all the resident transits are made by car (0.97 vs 0.71)
+  * **Pollution**: residents are more eco-friendly than the other (0.02 vs 0.09)
+  * **Electric**: almost no one among residents has an electric vehicle (0.002)
+  
+  
+#### LD1 coefficients
+If we want to look the "direction" of the prediction to understand which one tent to the resident, we can look the LD1 coefficients. 
+
+```{r lda-analysis, include=TRUE}
+table_ld1 <- data.frame(
+  Coefficient = c("categoria_veicoloPeople",
+                  "tipologia_alimentazionePetrol",
+                  "tipologia_alimentazioneElectric",
+                  "is_pollutantTRUE",
+                  "hour"),
+  
+  RealCategory = c("People (car)",
+                   "Petrol",
+                   "Electric",
+                   "Pollutant",
+                   "Hour"),
+  
+  LD1_Coefficient = c(1.18,
+                      1.09,
+                      -1.72,
+                      -1.46,
+                      0.04),
+  
+  Comment = c("Strongest positive discriminant",
+              "Second strongest pos. discriminant",
+              "Strongest negative discriminant",
+              "Decently strong discriminant",
+              "Costant push toward afternoon"),
+  
+  stringsAsFactors = FALSE)
+
+knitr::kable(
+  table_ld1,
+  caption = "LD1 Coefficients (LDA)",
+  align = "l")
+
+rm(table_ld1)
+```
+
+Combining the two comments we can say that the average Area C resident has **a private car, with an high probability of being petrol-powered** and it likes to drive **in the afternoon**. Even if the electrification is not a trend, residents are usually eco-friendly.
+
+
+
+## Method 3: K-Nearest Neighbors
+The LDA is a linear rigid model that may have omitted some situation where residents and non-residents overlap (especially in some gates or specific time). The KNN will not make assumption over the data but it will check how close are the data between every transit. If a vehicle at 18:00 is surrounded by residents, it'll be considered a resident. 
+
+The predictor chosen for this model are the ones that we can consider significant from the other analysis: hour, type of day, type of vehicle, pollution and fuel type.
+
+[!IMPORTANT]
+**IMPORTANT NOTE**: KNN uses a ton of ram (which i don't have...) so unfortunately I had to downsize the dataset a lot, use only numerical or boolean variables and scale. **This may have significally impacted the results and voided their validity during the comparison phase.** Another downside is the presence of too many ties, probably due to all the number transformation needed; to overcome the issue I've used `KKNN` instead of the classic `KNN.` `KKNN` simply assign more weight to the closest vehicles removing the ties. 
+
+
+```{r KNN, include=TRUE}
+
+# Data preparation
+knn_preparation <- function(data) {
+                    data %>%
+                    mutate(hour_scaled = as.numeric(scale(hour)), #Scale since other vars are 0/1
+                           is_weekend_num = as.numeric(as.logical(is_weekend)),
+                           is_pollutant_num = as.numeric(as.logical(is_pollutant)),
+                           
+                           # Bool vars for important predictors
+                           is_diesel = ifelse(tipologia_alimentazione == "Diesel", 1, 0),
+                           is_electric = ifelse(tipologia_alimentazione == "Electric", 1, 0),
+                           is_car = ifelse(categoria_veicolo == "People", 1, 0)) %>%
+    
+                    dplyr::select(hour_scaled, is_weekend_num, is_pollutant_num, 
+                                  is_diesel, is_electric, is_car)
+}
+
+
+# Samples creation
+set.seed(123)
+
+# Train set (30k residents, 30k non)
+train_sub <- rbind(train_data[train_data$residenti == TRUE, ] %>% sample_n(30000),
+                   train_data[train_data$residenti == FALSE, ] %>% sample_n(30000))
+
+train_knn_final <- knn_preparation(train_sub)
+train_knn_final$residenti <- as.factor(train_sub$residenti)
+
+# Train set (origianl proportion)
+test_sub <- test_data %>% sample_n(100000)
+
+test_knn_final <- knn_preparation(test_sub)
+real_target <- as.factor(test_sub$residenti)
+
+
+# Model
+knn_model <- kknn(residenti ~ ., 
+                    train = train_knn_final, 
+                    test = test_knn_final, 
+                    k = 15, 
+                    kernel = "triangular")
+
+predizioni_knn <- fitted(knn_model)
+
+```
+
+KNN does not produce a direct output (it's just a matrix), so we'll skip the comment phase.
+
+
+## Model verification
+The comparison between models we'll be conducted by computing: 
+
+  * **Accuracy**
+  * **Sensitivity**: ability to find residents
+  * **Specificity**: ability to distinguish non-residents
+
+As first step, let's launch the model over the test dataset.
+
+```{r test-prediction, include=TRUE}
+
+# Logistic Regression
+prob_logit <- predict(logit_model, newdata = test_sub, type = "response")
+pred_logit <- ifelse(prob_logit > 0.5, TRUE, FALSE)
+
+# LDA
+pred_lda <- predict(lda_model, newdata = test_sub)$class
+```
+
+Then let's extract the metrics and create the comparison table and plot
+
+```{r comparison, include=TRUE}
+# Metric extraction
+extract_metrics <- function(pred, actual, name) {
+  cm <- confusionMatrix(factor(pred, levels=c(FALSE, TRUE)), 
+                        factor(actual, levels=c(FALSE, TRUE)), 
+                        positive = "TRUE")
+  
+  data.frame(Model = name,
+             Accuracy = cm$overall[["Accuracy"]],
+             Sensitivity = cm$byClass[["Sensitivity"]],
+             Specificity = cm$byClass[["Specificity"]] )}
+
+# Table
+comparison_table <- rbind(
+  extract_metrics(pred_logit, real_target, "Logistic"),
+  extract_metrics(pred_lda, real_target, "LDA"),
+  extract_metrics(predizioni_knn, real_target, "KNN"))
+
+print(comparison_table)
+
+# Plot
+longer_table <- comparison_table %>%
+  pivot_longer(cols = c(Accuracy, Sensitivity, Specificity), 
+               names_to = "Metric", 
+               values_to = "Value")
+
+
+comparative_plot <- ggplot(longer_table, aes(x = Metric, y = Value, fill = Model)) +
+                           geom_bar(stat = "identity", position = "dodge", alpha = 0.8) + 
+                           geom_text(aes(label = round(Value, 3)), 
+                                     position = position_dodge(width = 0.9), 
+                                     vjust = -0.5,
+                                     size = 3.5, 
+                                     color = "black") + 
+                           scale_fill_manual(values = c("Logistic" = "#1f77b4", 
+                                                        "LDA" = "#ff7f0e", 
+                                                        "KNN" = "#2ca02c")) + 
+                           labs(title = "Model Comparison",
+                                x = "Metric",
+                                y = "Value",
+                                fill = "Model") +
+                           theme_minimal(base_size = 12) + 
+                           theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+                                 plot.subtitle = element_text(hjust = 0.5),
+                                 legend.position = "bottom") +
+                           ylim(0, 1.05)
+
+
+comp_plot <- ggplotly(comparative_plot)
+
+comp_plot
+```
+
+### Brief comment
+The Logistic Regression and the LDA are clearly the winners. Considering the difficulties mentioned at the beginning, both of them are really accurate (over 60%). LDA has performed slightly better in terms of accuracy (+0.05), but the Logistic Regression is more capable of identifying the residents (0.826 vs 0.817). Thanks to those results we can affirm that the border between resident and non-resident is linear.
+
+KNN had an extreme behavior: it can identify almost all the residents (0.986) but its specificity is ridiculously low (0.35); basically every user is considered a resident. This phenomena may be lead by the small distance between the residents, especially during the peak hours. KNN, looking at the peaks, gets hallucinated and starts to assign the resident label to everybody. This model can't be considered while answering the research questions.
+
+### Confusion matrix
+As last step, let's check the confusion matrix. THis will help us to observe how the models have classified every observation within the dataset. We'll do it for the Logistic Regression model since is the one that, overall, has performed the best. 
+
+```{r logistic-conf-matrix, include=TRUE}
+cm_logit <- confusionMatrix(factor(pred_logit, levels=c(FALSE, TRUE)), 
+                            factor(real_target, levels=c(FALSE, TRUE)), 
+                            positive = "TRUE")
+
+# Plot
+fourfoldplot(cm_logit$table, 
+             color = c("#CC6666", "#99CC99"),
+             conf.level = 0, 
+             margin = 1, 
+             main = "Logistic Regression: Confusion Matrix")
+```
+
+We can clearly see that the errors are given due an resident overprediction. The model tents to categorize as resident almost 35% users that are not resident. 
+
+
+## Answering the original question
+The identikit of a resident living inside the Cerchia dei Bastioni is composed by:
+
+  * **Vechicle type**: car
+  * **Fuel type**: petrol
+  * **Preferred time**: afternoon
+  
+The identikit has an accuracy of about 63%.
+
+
+
+# Pollution trend
+**In what context the more-pollutant-vehicles access the most?**
+
+This analysis section wants to identify what make the pollutant vehicles access the Area C gates. To do so we had two possibilities: Naive Bayes and Linear Discriminant Analysis. However, we'll stick with the already consolidated LDA thanks to its ability of predicting multiple classes at the same time while maximising the distance between them.
+
+```{r pollution-lda, include=TRUE}
+
+# Clean old variables
+rm(cm_logit, comp_plot, comparison_table, knn_model, lda_model, logit_model, longer_table, test_knn_final, train_balanced, train_knn_final, train_sub, test_sub, comparative_plot, pred_lda, pred_logit, n_residenti, predizioni_knn, prob_logit, real_target)
+
+# Data preparation
+set.seed(123)
+train_pollutant <- train_data %>%
+    group_by(is_pollutant) %>%
+    sample_n(min(table(train_data$is_pollutant))) %>% # Bilanciamo i gruppi
+    ungroup()
+
+# Model
+lda_pollutant <- lda(is_pollutant ~ hour + is_weekend + residenti + 
+                     tipologia_alimentazione + categoria_veicolo, 
+                     data = train_pollutant)
+
+print(lda_pollutant)
+
+```
+
+### Brief comment
+By the conducted analysis we can say that the pollutant increase is defined by several factors:
+
+  * **Diesel**: surely due to the strict Area C rules, the pollutant vehicles are almost always fueled by Diesel; vehicle with < Euro 5 classification and Diesel fuel are about 88.2% of all Diesel vehicles. Also the LD1 coefficient is the strongest (excluding oil-fuel mixture, which is an extreme situation)
+  * **Goods**: being a vehicle for goods deliveries makes you 29.3% more probable of being a pollutant vehicle; not a surprise considering that when the Area C policies are enabled the logistic traffic almost drops to zero.
+  * **Hour**: correlated to the deliveries, we can see that pollutant vehicles access Area C before non-pollutant vehicles (converting the values: 11:45 vs 12:20)
+  
+
+## Verification
+TO verify if the prediction are corretc, let's compute the evaluation metrics using the testing dataset.
+
+```{r pollution-lda-test, include=TRUE}
+# Data preparation
+test_pollutant <- test_data %>%
+  dplyr::select(is_pollutant, hour, is_weekend, residenti, 
+                tipologia_alimentazione, categoria_veicolo) %>%
+  filter(tipologia_alimentazione %in% levels(train_pollutant$tipologia_alimentazione)) %>%
+  mutate(is_pollutant = as.factor(is_pollutant)) %>%
+  droplevels()
+
+# Prediction
+pred_lda_poll <- predict(lda_pollutant, newdata = test_pollutant)
+
+# Evaluation
+cm_lda_poll <- confusionMatrix(pred_lda_poll$class, test_pollutant$is_pollutant, positive = "TRUE")
+print(cm_lda_poll$overall['Accuracy'])
+print(cm_lda_poll$byClass[c("Sensitivity", "Specificity", "Precision")])
+
+```
+
+### Brief result
+The accuracy sensitivity and specificity at almost 80% represent some really good results. The 25% on the precision is given by the overall low level of pollutant vehicles that may hallucinate the model by letting it assigning to a non pollutant vehicle the pollutant label.
+
+
+# Clou gates
+**Which are the clou gates?**
+
+During this section, we'll try to figure out which are the clou gates among the 43 available. Originally I wanted to answer to this question only from a quantitative perspective (using lasso), but I though that explaining also why it may be more interesting. For this reason, we'll use Naive Bayes for this research question. This choice is made since Naive Bayes should works perfectly with the predictors I've picked up (resident, vehicle type and hour) and should offer the best results with the conditional probability (given X characteristic, which gate will be chosen?)
+
+```{r clou-gates, include=TRUE}
+
+# Remove old stuff
+rm(lda_pollutant, train_pollutant, test_pollutant, pred_lda_poll, cm_lda_poll)
+
+# Chose the top 5 gates. 
+#Due to initial sampling, don't sort the gates inside train_data but select them manually from what saw in the EDA
+core_gates_list <- c("TURATI", "VENEZIA", "PORTA VITTORIA", "MASCHERONI", "BOCCACCIO")
+
+# Data preparation
+train_nb <- train_data %>%
+  filter(label %in% core_gates_list) %>%
+  dplyr::select(label, residenti, categoria_veicolo, is_pollutant, is_weekend) %>%
+  mutate_all(as.factor) %>%
+  droplevels()
+
+# Model
+nb_model <- naiveBayes(label ~ ., data = train_nb)
+
+print(nb_model$tables)
+```
+
+### Brief comment
+The results are coherent with the expected output respect to the EDA. We have the confirm that using a qualitative approach instead of a quantitative one have lead to some interesting details. Among the top 5 gates:
+
+  * **Mascheroni** and  **Boccaccio** are the residents ones with a probability of being a resident of about 15.5%
+  * **Porta Venezia** is the gate dedicated to the logistic (22%); not a surprise since it's the gate for entering Corso Buenos Aires
+  * **Porta Vittoria** has a courious user profilation since the predominant vehicle type is "other"; probabily is a gate used by workers or special vehicles
+  * **Turati** while being the most used, is also the most balanced 
+  
+The traffic distribution in the weekend is flatter: during Saturday and Sunday the gates have almost the same quota (26% on average). The pollution information aren't a good discriminant. 
+
+
+## Model validation
+Let's run the just-trained Naive Bayes model over the testing data.
+```{r clou-gates-test, include=TRUE}
+
+# Data preparation
+test_nb <- test_data %>%
+  filter(label %in% core_gates_list) %>%
+  dplyr::select(label, residenti, categoria_veicolo, is_pollutant, is_weekend) %>%
+  mutate_all(as.factor) %>%
+  droplevels()
+
+# Prediction
+pred_nb <- predict(nb_model, test_nb)
+
+# Evaluation
+cm_nb <- confusionMatrix(pred_nb, test_nb$label)
+print(cm_nb$overall['Accuracy'])
+print(cm_nb$byClass[, c("Precision", "Recall")])
+
+# Plot
+cm_table <- as.data.frame(cm_nb$table)
+
+ggplot(data = cm_table, aes(x = Reference, y = Prediction, fill = Freq)) +
+                        geom_tile(color = "white") +
+                        scale_fill_gradient(low ="#ffb88e", high = "#ea5753") +
+                        geom_text(aes(label = Freq), vjust = 1) +
+                        theme_minimal() +
+                        labs(title = "Confusion Matrix Heatmap",
+                             x = "Real data",
+                             y = "Predicted data") +
+                        theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+### Brief comment
+Unfortunaly the accuracy is quite low compared to the other model used in this project. Having a 22% of accuracy is telling us that the user behavior is very similar among the top 5 gates, making the distintion difficult.
+
+The Turati recall is probably the main cause: looking at the EDA, its traffic is way bigger than the other 4 main gates. Due to this unbalancement the model assign almost every vehicle to Turati. Also, the plot confirms the Turati-attraction: instead of a diagonal, the darker colors are focused just at the Turati gate.
+
+A nice result is obtained with Porta Vittoria where the model has profiled correctly 53% of the transits, making this gate the more predictable. 
+
+
+
+# Preferred gates
+**Which are the gates preferred by residents?**
+
+The final question we'll answer is related again to the resident identikit. However, this time we'll use the gate perspective, finding the gates used the most by the residents. 
+
+Since we'll work with a categorical predictor such as the gate name but we have a binary variable, we'll use the Least Absolute Shrinkage and Selection Operator model. The Lasso should have the ability of removing the gate coefficients that are irrelevant for our purpose while keeping alive the interesting ones.
+
+As before, in the data preparation, we have to convert predictor as number and use binomial family since the target is binary. 
+
+[!IMPORTANT]
+**IMPORTANT NOTE**: like KNN, using the lasso with a matrix with 43 gates uses a ton of ram. I've chose to sample 100'000 rows (50k residents, 50k not). **This may have significally impacted the results.** 
+
+```{r lasso, include=TRUE}
+
+# Clean old stuff
+rm(cm_nb, cm_table, nb_model, scores, test_nb, train_nb, pred_nb, conf_matrix, conf_matrix_prop, core_gates_list)
+
+# Sampling
+set.seed(123)
+train_lasso_sub <- train_data %>%
+  group_by(residenti) %>%
+  sample_n(50000) %>%
+  ungroup()
+
+# Matrix: X (gates) e Y (residents)
+X_lasso <- model.matrix(residenti ~ label - 1, data = train_lasso_sub)
+Y_lasso <- as.numeric(train_lasso_sub$residenti)
+
+# Model (\w cross validation)
+cv_lasso <- cv.glmnet(X_lasso, Y_lasso, family = "binomial", alpha = 1)
+coef_lasso <- coef(cv_lasso, s = "lambda.1se") # lambda.1se for a more solid model
+
+# Dataframe
+gates_results <- data.frame(gate = rownames(coef_lasso),
+                            coefficient = as.numeric(coef_lasso)) %>%
+                  filter(coefficient != 0 & gate != "(Intercept)") %>%
+                  mutate(gate = gsub("label", "", gate)) %>% 
+                  arrange(desc(coefficient))
+
+# Results
+print("Positive Coefficients (residential gates):")
+print(head(gates_results, 10))
+
+print("Negative Coefficients (non-residential gates):")
+print(tail(gates_results, 10))
+
+
+#Plot
+sf_gatesGPS <- readRDS("Cache/sf_gatesGPS.rds")
+
+gate_geo <- sf_gatesGPS %>%
+  filter(!(label %in% c("ITALIA", "LAMARMORA", "MAGENTA", "PORTA VIGENTINA"))) %>% #remove smaller gates
+  rename(gate = label) %>%
+  inner_join(gates_results, by = "gate")
+
+print(gate_geo)
+
+pal <- colorNumeric( 
+  palette = "RdYlGn", # Red-Yellow-Green
+  domain = gate_geo$coefficient)
+
+
+leaflet(gate_geo) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addCircleMarkers(radius = ~abs(coefficient) * 10 + 4,
+                   color = ~pal(coefficient),
+                   stroke = TRUE, fillOpacity = 0.7,
+                   popup = ~paste0("Gate: ", gate, "<br>",
+                                   "Residential index: ", round(coefficient, 3), "<br>",
+                                   ifelse(coefficient > 0, "More residents", "Less residents"))) %>%
+  
+  addLegend(pal = pal, 
+            values = ~coefficient, 
+            title = "Preferred gates",
+            labFormat = labelFormat(prefix = " "),
+            opacity = 1)
+```
+
+### Brief comment
+Given the Lasso and map results, we can see a clear distintion about the preferred gates:
+
+  * **South-west**: here there are the gates with the highest coefficient values. *Melegnano* and *Servio Tullio*, the most used gates, are located in an historical residential area and narrow roads; only residents may have interest to use those gates
+  * **East**: the less interested gates are the one on the east axis. The gates with lower coefficient such as *Venezia* and *Monforte* are the commercial roads less appetible for resident entrance. 
+  
+Switching from Naive Bayes to Lasso has allowed us to fine tuning our research: we went from generalistic core gates (from Bayes) to isolated and precise gates thanks to the Lasso ability to isolate the less interesting predictor gates.
+
+
+## Model validation
+As last step, le's check the bounty of the prediction with the testing dataset.
+
+```{r lasso-test, include=TRUE}
+# Data preparation
+X_test_lasso <- model.matrix(residenti ~ label - 1, data = test_data)
+Y_test_lasso <- as.factor(test_data$residenti)
+
+# Prediction
+prob_lasso <- predict(cv_lasso, newx = X_test_lasso, s = "lambda.1se", type = "response")
+pred_lasso <- ifelse(prob_lasso > 0.5, TRUE, FALSE)
+pred_lasso <- factor(pred_lasso, levels = c("FALSE", "TRUE"))
+
+# Confusion matrix
+cm_lasso <- confusionMatrix(pred_lasso, Y_test_lasso, positive = "TRUE")
+
+# Results
+print(cm_lasso$overall['Accuracy'])
+print(cm_lasso$byClass[c("Sensitivity", "Specificity", "Precision")])
+```
+
+### Brief comment
+An accuracy of 41% in a multiclass analysis, and with an unbalanced number of residents, is a valid results; combining the sensitivity with the accuracy will reveal a good model validation. 
+
+* The **sensitivity** is really good, it can identify 75% of the residents
+* The **specificity** at 35% tells us that the model struggle a little while excluding the non-resident; this is giustificable since resident-gates are used also by non-residents
+* The **accuracy** is telling us something we already knew: the gate by itself isn't a sufficient resident predictor, but it's a great characteristic to consider.
+
+
